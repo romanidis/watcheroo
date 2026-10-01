@@ -1,0 +1,25 @@
+# https://taskfile.dev
+
+version: '3'
+
+tasks:
+  build:
+    desc: "Build watcheroo into bin/"
+    cmds:
+      - go build -o bin/watcheroo .
+
+  test:
+    desc: "Vet the code and run the tests with the race detector"
+    cmds:
+      - go vet ./...
+      - go test -race ./...
+
+  install:
+    desc: "Install watcheroo into $GOBIN, or ~/go/bin"
+    cmds:
+      - go install .
+
+  docs:
+    desc: "Write the command reference into docs/"
+    cmds:
+      - go run ./cmd/docs --dir docs
