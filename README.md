@@ -1,37 +1,23 @@
 # watcheroo
 
-watcheroo runs a command, then runs it again every time one of the files you're
-watching changes.
+Rerun a command every time the files it reads change.
 
-It was made for prototyping and scripting in awk. An awk program usually grows
-by trial: change a pattern, run it on the data, read what came out, change it
-again. watcheroo takes the rerunning out of that loop. Keep the script open in
-your editor and watcheroo in a terminal beside it, and every save shows the new
-output. In diff mode it also marks what changed since the last run, down to the
-one number in a wide line that moved.
+I made this for awk. Prototyping an awk script usually goes like this: tweak
+the script, switch to the terminal, up-arrow, enter, then squint at the output
+to work out what changed. Then do it all again, a few dozen times. watcheroo
+does the switching and the squinting for you. Leave it running next to your
+editor, and every time you save the script or the data changes, it reruns and
+shows you the new output with the changes highlighted.
 
 ```sh
 watcheroo -w report.awk -w 'data/*.csv' -m diff -- awk -f report.awk {}
 ```
 
-Several of its choices come from that use:
+Everything before `--` is what to watch, and everything after it is what to
+run. `{}` gets replaced with the watched files.
 
-- `{}` passes the data files to awk and leaves out the script that `awk -f`
-  already names. Editing the script reruns it, without awk also reading the
-  script as input.
-- Wildcards are expanded again on every check, so a new CSV dropped into
-  `data/` is part of the next run.
-- Diff mode highlights the words that changed, not just the lines, because
-  awk's output is usually columns of numbers. `--baseline first` shows how far
-  your edits have moved the result since you started.
-- The command runs directly, not through a shell. When a prototype grows into
-  a pipeline, `sh -c` takes the files as `"$@"`.
-
-It works with any command, whether a Python script, `psql -f query.sql` or
-`go run .`, but awk is what it was built around.
-
-Every flag is listed in [docs/watcheroo.md](docs/watcheroo.md), which is
-generated from `watcheroo --help` by `task docs`.
+It isn't awk-only. Anything that reads files and prints something works fine.
+It's just tuned for the edit, run, look loop that awk scripting is.
 
 ## Install
 
@@ -39,127 +25,76 @@ generated from `watcheroo --help` by `task docs`.
 go install github.com/romanidis/watcheroo@latest
 ```
 
-Or, from a clone:
+For tab completion, put `source <(watcheroo completion zsh)` in your `.zshrc`.
+bash and fish work too.
+
+## Examples
+
+Rerun a report whenever the script or any CSV changes, and show what changed:
 
 ```sh
-task install   # go install . — puts watcheroo in $GOBIN, or ~/go/bin
+watcheroo -w report.awk -w 'data/*.csv' -m diff -- awk -f report.awk {}
 ```
 
-For tab completion of `--mode` and `--baseline` values, load the script
-`watcheroo completion zsh` prints (or `bash`, `fish`, `powershell`), e.g. in
-`~/.zshrc`:
-
-```sh
-source <(watcheroo completion zsh)
-```
-
-## What to watch
-
-Everything before `--` says what to watch. The command to run comes after it.
-
-- `-w`, `--watch`: a file, a wildcard or a directory. Repeat the flag, or list
-  more names after it: `--watch a.txt b.txt`.
-  - Quote wildcards (`'data/*.csv'`) so watcheroo expands them itself on every
-    check. That way a file created later is picked up too.
-  - A directory means every file under it, in subdirectories as well.
-- `-r`, `--regex`: a regular expression matched against the path of every file
-  under the current directory. Unless you anchor it with `^`, it can match
-  anywhere in the path.
-  - In a large tree, anchor it with a directory (`'^data/.*\.csv$'`) so only
-    that directory is searched.
-- Hidden files and directories (names starting with `.`) are skipped unless a
-  pattern includes the dot itself, as in `.env` or `'.*.conf'`, or you give
-  `--hidden`. That keeps editor swap files and `.git` out.
-- `-x`, `--exclude`: a file, directory or wildcard not to watch, along with
-  everything under it. Repeat it for more.
-  - Without a `/` it's matched against every name in the path, so
-    `-x node_modules` skips that directory wherever it is, and `-x '*.tmp'`
-    skips every `.tmp` file.
-  - With a `/` it's matched against the whole path: `-x 'out/*.csv'`.
-  - Exclude whatever the command writes into a watched directory. Otherwise
-    each run changes a watched file, and the command reruns forever.
-- `--exclude-regex`: a regular expression for paths not to watch, matched the
-  way `--regex` is.
-- `--list` prints the files that are watched and the command they make, then
-  stops. Use it to check what a wildcard or regex matches:
-
-  ```
-  $ watcheroo --list -w report.awk -w '*.csv' -x out.csv -- awk -f report.awk {}
-  watching:
-    a.csv
-    b.csv
-    report.awk
-  running:
-    awk -f report.awk a.csv b.csv
-  ```
-
-watcheroo checks for changes every 300ms. Change that with `--interval`.
-`--debounce 500ms` waits until the files have stopped changing for that long
-before running, so a file saved in several writes is read once, when it's
-whole. `--postpone` skips the run at the start and waits for the first change.
-
-## `{}`
-
-An argument that is exactly `{}` is replaced by the watched files, sorted, one
-argument each. Any watched file the command already names as a separate
-argument, such as the script in `awk -f report.awk`, is watched but left out of
-`{}`. That way, editing the script reruns the command without awk also reading
-the script as input.
-
-The command runs directly, not through a shell. For pipes, run `sh -c` and pass
-the files to it as arguments:
+Count errors across a bunch of logs. watcheroo doesn't run your command through
+a shell, so for a pipe you bring your own:
 
 ```sh
 watcheroo -r '^logs/.*\.log$' -- sh -c 'awk "/ERROR/" "$@" | sort | uniq -c' sh {}
 ```
 
-## Modes
-
-`-m`, `--mode` sets what happens to the previous run's output:
-
-| mode | what you see |
-| --- | --- |
-| `clear` (default) | the screen is cleared before each run, so only the latest output shows |
-| `append` | earlier output stays, with a timestamp line before each run |
-| `diff` | the screen is cleared and the whole output is shown, with what changed since the previous run marked |
-
-A command that fails doesn't stop the watch. Its exit status is printed in red,
-and the next change runs it again. Stop watching with Ctrl-C.
-
-Colours are left out when you give `--no-color` or set `NO_COLOR`. When the
-output isn't a terminal, as in `watcheroo … | tee log`, the screen isn't
-cleared either, so the log holds just the text.
-
-## Commands that don't end
-
-A command that keeps running, like a server, would hold up the watch: the next
-run waits for the previous one to end. Give `--restart`, and a change stops the
-running command and starts it again:
+Keep a dev server running and restart it whenever the code changes:
 
 ```sh
 watcheroo -r '\.go$' -x vendor --restart -- go run .
 ```
 
-The command is stopped with SIGTERM, sent to it and to every process it
-started, so the server `go run` builds stops too and doesn't keep holding its
-port. If it hasn't ended 5 seconds later, it's killed. `--restart` doesn't work
-with diff mode, which can only show the output once the command has ended.
+Not sure what a pattern matches? Ask it:
 
-## Diff mode, step by step
+```
+$ watcheroo --list -w report.awk -w '*.csv' -x out.csv -- awk -f report.awk {}
+watching:
+  a.csv
+  b.csv
+  report.awk
+running:
+  awk -f report.awk a.csv b.csv
+```
 
-Diff mode shows the whole output on every run, like `clear`, and marks what
-changed since the run before:
+## Things worth knowing
 
-- two spaces before a line that didn't change
-- `-` and red for a line that went away
-- `+` and green for a line that is new
+- **Quote your wildcards.** Write `'data/*.csv'`, not `data/*.csv`. When
+  watcheroo gets the wildcard itself, it expands it again on every check, so a
+  CSV you add later gets picked up too.
+- **`{}` skips the script.** In `awk -f report.awk {}`, `report.awk` is watched,
+  but it isn't passed again through `{}`. Otherwise awk would read your script
+  as data.
+- **Dotfiles are ignored**, so `.git` and editor swap files don't trigger
+  reruns. To watch one, name it with the dot, like `.env`, or pass `--hidden`.
+- **Don't watch your own output.** If the command writes into a directory
+  you're watching, it'll keep triggering itself forever. Exclude the output
+  with `-x out` or `-x '*.tmp'`. An exclude without a slash matches any name
+  in the path, so `-x node_modules` skips that directory wherever it is.
+- **A failing command doesn't stop anything.** You'll see its exit status in
+  red, and the next change runs it again. Hit Ctrl-C to quit.
+- **`--restart` cleans up after itself.** It sends SIGTERM to the command and to
+  everything the command started, so the server that `go run` builds actually
+  stops and frees its port. If the command is still running 5 seconds later,
+  it gets killed. It doesn't work together with diff mode.
+- **Piping the output is fine.** When stdout isn't a terminal, as in
+  `| tee log`, watcheroo skips the colours and the screen clearing. To turn off
+  colour everywhere, use `--no-color` or set `NO_COLOR`.
 
-When a line changed rather than disappeared, the old version (`-`) and the new
-one (`+`) appear one after the other, and only the words that changed are
-highlighted. That makes a single changed number easy to spot in a wide line. In
-the examples below, `[brackets]` stand for that highlight.
+## Diff mode
 
-With `sales.csv` and this `report.awk`:
+Diff mode is the main reason watcheroo exists. Each run clears the screen,
+prints the whole output, and marks what changed since the run before. The old
+version of a line gets a `-` and red, and the new version gets a `+` and green.
+Within a changed line, only the words that changed are highlighted, so one
+number moving in a wide table is easy to spot. Below, `[brackets]` stand in for
+that highlight.
+
+Say you have `sales.csv` and this `report.awk`:
 
 ```awk
 BEGIN { FS = "," }
@@ -171,7 +106,7 @@ END { for (name in total) printf "%-6s %4d  %s\n", name, total[name], region[nam
 watcheroo -w report.awk -w '*.csv' -m diff -- awk -f report.awk {}
 ```
 
-The first run has nothing to compare with, so nothing is marked:
+The first run has nothing to compare against:
 
 ```
 23:33:28  awk -f report.awk sales.csv
@@ -179,7 +114,7 @@ The first run has nothing to compare with, so nothing is marked:
   bob      20  south
 ```
 
-Change bob's line in `sales.csv` from `bob,20,south` to `bob,35,east`:
+Change bob's row from `bob,20,south` to `bob,35,east`:
 
 ```diff
 23:33:29  awk -f report.awk sales.csv
@@ -188,7 +123,7 @@ Change bob's line in `sales.csv` from `bob,20,south` to `bob,35,east`:
 + bob      [35]  [east]
 ```
 
-Add `carol,7,west` to `sales.csv`:
+Add `carol,7,west`:
 
 ```diff
 23:33:30  awk -f report.awk sales.csv
@@ -197,8 +132,8 @@ Add `carol,7,west` to `sales.csv`:
 + carol     7  west
 ```
 
-Create `march.csv` with `alice,4,north` in it. The `*.csv` wildcard picks it
-up, `{}` passes it to awk, and alice's total changes:
+Drop a new `march.csv` in with `alice,4,north`. The wildcard picks it up, `{}`
+passes it to awk, and alice's total moves:
 
 ```diff
 23:33:30  awk -f report.awk march.csv sales.csv
@@ -208,33 +143,50 @@ up, `{}` passes it to awk, and alice's total changes:
   carol     7  west
 ```
 
-Edit the script without changing what it prints, such as adding a comment:
+If you edit the script without changing what it prints, it tells you so with
+`(output unchanged)`.
 
-```
-23:33:31  awk -f report.awk march.csv sales.csv
-(output unchanged)
-  alice    14  north
-  bob      35  east
-  carol     7  west
-```
+A few flags change how this works:
 
-Each run is compared with the run just before it. Three flags change what
-diff mode shows:
+- `--baseline first` compares every run with the first one instead of the
+  previous one, which shows how far you've drifted since you started.
+- `--context 2` shows only the changed lines and 2 lines around each one. The
+  lines it hides are counted, like `(12 unchanged lines)`. Handy when the
+  output is longer than your screen.
+- `--merge-stderr` diffs stderr along with stdout. Without it, error lines are
+  printed above the output as they come.
 
-- `--baseline first` compares every run with the first run instead, which
-  shows how far the output has moved overall. A run whose output is back to
-  the first one's says `(output as in the first run)`.
-- `--context N` shows only the lines that changed and `N` lines around each.
-  The lines it leaves out are counted, as in `(12 unchanged lines)`. The first
-  run is still shown whole.
-- `--merge-stderr` sends the command's stderr where its stdout goes, so error
-  lines are diffed in place with the rest of the output. Without it they are
-  printed straight away, above the output.
+## All the flags
 
-## Development
+| flag | what it does |
+| --- | --- |
+| `-w`, `--watch` | a file, wildcard or directory to watch |
+| `-r`, `--regex` | a regex for paths to watch; anchor it like `'^data/'` to keep it fast |
+| `-x`, `--exclude` | a file, directory or wildcard to skip |
+| `--exclude-regex` | a regex for paths to skip |
+| `--hidden` | watch dotfiles too |
+| `-m`, `--mode` | `clear` (the default), `append` or `diff` |
+| `--baseline` | in diff mode, compare with the `previous` run (the default) or the `first` |
+| `--context N` | in diff mode, show only changed lines plus `N` around them |
+| `--merge-stderr` | treat stderr as part of the output |
+| `--restart` | stop the command and start it again on every change |
+| `--debounce 500ms` | wait until the files stop changing before running |
+| `--postpone` | don't run until the first change |
+| `--interval` | how often to check for changes (default 300ms) |
+| `--list` | print what's watched and what would run, then quit |
+| `--no-color` | no colours |
+
+The full reference is in [docs/watcheroo.md](docs/watcheroo.md), generated from
+`watcheroo --help`.
+
+## Hacking on it
 
 ```sh
 task build    # bin/watcheroo
 task test     # go vet, then the tests with -race
-task docs     # the command reference into docs/
+task docs     # regenerate docs/ from --help
 ```
+
+## License
+
+MIT, see [LICENSE](LICENSE).
