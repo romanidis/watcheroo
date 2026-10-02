@@ -4,9 +4,9 @@ version: '3'
 
 tasks:
   build:
-    desc: "Build watcheroo into bin/"
+    desc: "Build wtr into bin/"
     cmds:
-      - go build -o bin/watcheroo .
+      - go build -o bin/wtr ./cmd/wtr
 
   test:
     desc: "Vet the code and run the tests with the race detector"
@@ -15,9 +15,9 @@ tasks:
       - go test -race ./...
 
   install:
-    desc: "Install watcheroo into $GOBIN, or ~/go/bin"
+    desc: "Install wtr into $GOBIN, or ~/go/bin"
     cmds:
-      - go install .
+      - go install ./cmd/wtr
 
   docs:
     desc: "Write the command reference into docs/"

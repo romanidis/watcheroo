@@ -36,6 +36,16 @@ func TestWatcheroo(t *testing.T) {
 			want: "--regex stringArray",
 		},
 		{
+			name: "--version",
+			args: []string{"--version"},
+			want: "wtr version ",
+		},
+		{
+			name: "bare, it prints the help",
+			args: []string{}, // not nil, which would make cobra read os.Args
+			want: "Usage:\n  wtr [--watch] GLOB...",
+		},
+		{
 			name: "globs listed after --watch are watched, not run",
 			args: []string{"--watch", "file1.txt", "file2.txt", "--", "echo", "hi"},
 			want: "  echo hi",
@@ -124,6 +134,24 @@ func TestWatcheroo(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name:    "--shell with the command in more than one argument",
+			args:    []string{"--watch", "file1.txt", "--shell", "--", "awk", "-f", "x.awk"},
+			want:    "with --shell, give the command as one argument after --",
+			wantErr: true,
+		},
+		{
+			name:    "a negative --timeout",
+			args:    []string{"--watch", "file1.txt", "--timeout", "-1s", "--", "echo"},
+			want:    "--timeout cannot be less than zero",
+			wantErr: true,
+		},
+		{
+			name:    "--timeout with --restart",
+			args:    []string{"--watch", "file1.txt", "--restart", "--timeout", "1s", "--", "echo"},
+			want:    "--timeout does not work with --restart",
+			wantErr: true,
+		},
+		{
 			name:    "an --exclude that does not parse",
 			args:    []string{"--watch", "file1.txt", "--exclude", "[", "--", "echo"},
 			want:    `--exclude "[": syntax error in pattern`,
@@ -180,12 +208,32 @@ func TestWatcherooList(t *testing.T) {
 		{
 			name: "the files and the command they make",
 			args: []string{"--list", "-w", "report.awk", "-w", "*.csv", "-x", "out.csv", "--", "awk", "-f", "report.awk", "{}"},
-			want: "watching:\n  a.csv\n  b.csv\n  report.awk\nrunning:\n  awk -f report.awk a.csv b.csv\n",
+			want: "watching:\n  report.awk\n  a.csv\n  b.csv\nrunning:\n  awk -f report.awk a.csv b.csv\n",
+		},
+		{
+			name: "{} keeps the order the files were given in",
+			args: []string{"--list", "-w", "report.awk", "b.csv", "--", "awk", "-f", "{}"},
+			want: "watching:\n  report.awk\n  b.csv\nrunning:\n  awk -f report.awk b.csv\n",
+		},
+		{
+			name: "names before -- in among --watch and --regex where they were given",
+			args: []string{"--list", "b.csv", "-w", "out.csv", "a.csv", "-r", "^report", "--", "echo", "{}"},
+			want: "watching:\n  b.csv\n  out.csv\n  a.csv\n  report.awk\nrunning:\n  echo b.csv out.csv a.csv report.awk\n",
+		},
+		{
+			name: "--shell runs the command with sh -c, the files in $@",
+			args: []string{"--list", "-s", "-w", "report.awk", "a.csv", "--", `awk -f report.awk "$@" | sort`},
+			want: "watching:\n  report.awk\n  a.csv\nrunning:\n  sh -c 'awk -f report.awk \"$@\" | sort' sh a.csv\n",
 		},
 		{
 			name: "nothing matched",
 			args: []string{"--list", "-w", "*.txt", "--", "echo", "{}"},
-			want: "watching:\n  (nothing matches yet)\nrunning:\n  echo\n",
+			want: "watching:\n  (nothing matches yet)\nmatching nothing yet:\n  *.txt\nrunning:\n  echo\n",
+		},
+		{
+			name: "a pattern that matches nothing, among ones that do",
+			args: []string{"--list", "-w", "report.awk", "reprot.awk", "-r", "^data/", "--", "echo", "{}"},
+			want: "watching:\n  report.awk\nmatching nothing yet:\n  reprot.awk\n  ^data/\nrunning:\n  echo report.awk\n",
 		},
 	}
 	for _, tt := range tests {

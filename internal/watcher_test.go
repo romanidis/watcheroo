@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"slices"
 	"strings"
@@ -28,8 +29,8 @@ func writeFiles(t *testing.T, paths ...string) {
 func TestWatcherScan(t *testing.T) {
 	t.Chdir(t.TempDir())
 	writeFiles(t,
-		"a.txt", "b.txt", "c.csv", ".env", ".a.txt.swp",
-		"data/jan.csv", "data/feb.csv", "data/notes.md", "data/.jan.csv.swp", "data/old/dec.csv",
+		"a.txt", "b.txt", "c.csv", ".env", ".a.txt.swp", "b.txt~",
+		"data/jan.csv", "data/feb.csv", "data/notes.md", "data/.jan.csv.swp", "data/#jan.csv#", "data/old/dec.csv",
 		".git/config", ".git/objects/ab/cdef",
 	)
 
@@ -69,9 +70,34 @@ func TestWatcherScan(t *testing.T) {
 			},
 		},
 		{
+			name:  "** matches any number of directories",
+			globs: []string{"data/**/*.csv"},
+			want:  []string{"data/feb.csv", "data/jan.csv", "data/old/dec.csv"},
+		},
+		{
+			name:  "** does not go into hidden directories",
+			globs: []string{"**/config"},
+			want:  nil,
+		},
+		{
+			name:  "braces match either name",
+			globs: []string{"*.{txt,csv}"},
+			want:  []string{"a.txt", "b.txt", "c.csv"},
+		},
+		{
+			name:    "editor backups are left out of what a regex matches",
+			regexes: []string{`jan`},
+			want:    []string{"data/jan.csv"},
+		},
+		{
+			name:  "editor backups a glob names on purpose",
+			globs: []string{"*~", "data/#*#"},
+			want:  []string{"b.txt~", "data/#jan.csv#"},
+		},
+		{
 			name:  "a hidden file named with its dot",
 			globs: []string{".env", ".*.swp"},
-			want:  []string{".a.txt.swp", ".env"},
+			want:  []string{".env", ".a.txt.swp"},
 		},
 		{
 			name:  "a directory stands for every file under it",
@@ -120,6 +146,12 @@ func TestWatcherScan(t *testing.T) {
 			},
 		},
 		{
+			name:  "--hidden lets ** go into hidden directories",
+			globs: []string{"**/config"},
+			opts:  []WatcherOption{WithHidden()},
+			want:  []string{".git/config"},
+		},
+		{
 			name:    "--hidden lets a regex reach into hidden directories",
 			regexes: []string{`config|env`},
 			opts:    []WatcherOption{WithHidden()},
@@ -150,6 +182,12 @@ func TestWatcherScan(t *testing.T) {
 			want:  []string{"data/jan.csv"},
 		},
 		{
+			name:  "an exclude with **",
+			globs: []string{"data"},
+			opts:  []WatcherOption{WithExcludes([]string{"**/old"}, nil)},
+			want:  []string{"data/feb.csv", "data/jan.csv", "data/notes.md"},
+		},
+		{
 			name:    "an exclude regex",
 			regexes: []string{`\.csv$`},
 			opts:    []WatcherOption{WithExcludes(nil, []*regexp.Regexp{regexp.MustCompile(`^data/old/|^c`)})},
@@ -158,17 +196,75 @@ func TestWatcherScan(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var res []*regexp.Regexp
-			for _, expr := range tt.regexes {
-				res = append(res, regexp.MustCompile(expr))
+			var patterns []Pattern
+			for _, glob := range tt.globs {
+				patterns = append(patterns, Pattern{Glob: glob})
 			}
-			w := NewWatcher(time.Millisecond, tt.globs, res, tt.opts...)
+			for _, expr := range tt.regexes {
+				patterns = append(patterns, Pattern{Regex: regexp.MustCompile(expr)})
+			}
+			w := NewWatcher(time.Millisecond, patterns, tt.opts...)
 			got, err := w.Files()
 			if err != nil {
 				t.Fatal(err)
 			}
 			if !slices.Equal(got, tt.want) {
 				t.Errorf("matched %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestWatcherOrder(t *testing.T) {
+	t.Chdir(t.TempDir())
+	writeFiles(t, "process.awk", "data.tsv", "a.csv", "b.csv", "logs/y.log", "logs/z.log")
+	re := regexp.MustCompile
+
+	tests := []struct {
+		name     string
+		patterns []Pattern
+		want     []string
+	}{
+		{
+			name:     "files in the order of their patterns",
+			patterns: []Pattern{{Glob: "process.awk"}, {Glob: "data.tsv"}},
+			want:     []string{"process.awk", "data.tsv"},
+		},
+		{
+			name:     "the files one glob matches in path order",
+			patterns: []Pattern{{Glob: "data.tsv"}, {Glob: "*.csv"}},
+			want:     []string{"data.tsv", "a.csv", "b.csv"},
+		},
+		{
+			name:     "a file two globs match in the place of the first",
+			patterns: []Pattern{{Glob: "b.csv"}, {Glob: "*.csv"}},
+			want:     []string{"b.csv", "a.csv"},
+		},
+		{
+			name:     "a file a regex and a later glob match in the place of the regex",
+			patterns: []Pattern{{Regex: re(`\.awk$`)}, {Glob: "data.tsv"}, {Glob: "process.awk"}},
+			want:     []string{"process.awk", "data.tsv"},
+		},
+		{
+			name:     "regexes walked from one directory",
+			patterns: []Pattern{{Regex: re(`\.awk$`)}, {Regex: re(`\.tsv$`)}},
+			want:     []string{"process.awk", "data.tsv"},
+		},
+		{
+			name:     "regexes walked from different directories",
+			patterns: []Pattern{{Regex: re(`^logs/`)}, {Glob: "data.tsv"}, {Regex: re(`\.csv$`)}},
+			want:     []string{"logs/y.log", "logs/z.log", "data.tsv", "a.csv", "b.csv"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := NewWatcher(time.Millisecond, tt.patterns)
+			got, err := w.Files()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("listed %v, want %v", got, tt.want)
 			}
 		})
 	}
@@ -206,9 +302,9 @@ func watchTxt(t *testing.T, opts ...WatcherOption) (runs chan []string, stop fun
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	runs = make(chan []string, 100)
-	w := NewWatcher(10*time.Millisecond, []string{"*.txt"}, nil, opts...)
+	w := NewWatcher(10*time.Millisecond, []Pattern{{Glob: "*.txt"}}, opts...)
 	done := make(chan error)
-	go func() { done <- w.Run(ctx, func(_ context.Context, files []string) { runs <- files }) }()
+	go func() { done <- w.Run(ctx, func(_ context.Context, c Change) { runs <- c.Files }) }()
 	stop = func() {
 		t.Helper()
 		cancel()
@@ -314,13 +410,13 @@ func TestWatcherRestart(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	events := make(chan string, 10)
-	w := NewWatcher(10*time.Millisecond, []string{"*.txt"}, nil, WithRestart())
+	w := NewWatcher(10*time.Millisecond, []Pattern{{Glob: "*.txt"}}, WithRestart())
 	done := make(chan error)
 	go func() {
-		done <- w.Run(ctx, func(ctx context.Context, files []string) {
-			events <- fmt.Sprint("start ", files)
+		done <- w.Run(ctx, func(ctx context.Context, c Change) {
+			events <- fmt.Sprint("start ", c.Files)
 			<-ctx.Done() // a command that runs until it is stopped
-			events <- fmt.Sprint("stop ", files)
+			events <- fmt.Sprint("stop ", c.Files)
 		})
 	}()
 	expect := func(why, want string) {
@@ -343,5 +439,152 @@ func TestWatcherRestart(t *testing.T) {
 	expect("the watch was stopped", "stop [a.txt b.txt]")
 	if err := <-done; err != nil {
 		t.Errorf("Run returned %v, want nil once its context is done", err)
+	}
+}
+
+// runWatcher starts w, calling back with onChange, and returns a function
+// that stops it and checks it ended well.
+func runWatcher(t *testing.T, w Watcher, onChange func(context.Context, Change)) (stop func()) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error)
+	go func() { done <- w.Run(ctx, onChange) }()
+	t.Cleanup(cancel)
+	return func() {
+		t.Helper()
+		cancel()
+		if err := <-done; err != nil {
+			t.Errorf("Run returned %v, want nil once its context is done", err)
+		}
+	}
+}
+
+// expectEvent fails the test unless events has want soon.
+func expectEvent(t *testing.T, events chan string, why, want string) {
+	t.Helper()
+	select {
+	case got := <-events:
+		if got != want {
+			t.Errorf("after %s, got %q, want %q", why, got, want)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("nothing after %s, want %q", why, want)
+	}
+}
+
+// expectNoEvent fails the test if events has anything within 100ms.
+func expectNoEvent(t *testing.T, events chan string, why string) {
+	t.Helper()
+	select {
+	case got := <-events:
+		t.Fatalf("got %q after %s, want nothing", got, why)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestWatcherChange(t *testing.T) {
+	t.Chdir(t.TempDir())
+	writeFiles(t, "a.txt", "b.txt")
+	changes := make(chan Change, 10)
+	w := NewWatcher(10*time.Millisecond, []Pattern{{Glob: "*.txt"}, {Glob: "later.csv"}}, WithDebounce(100*time.Millisecond))
+	stop := runWatcher(t, w, func(_ context.Context, c Change) { changes <- c })
+	expect := func(why string, want Change) {
+		t.Helper()
+		select {
+		case got := <-changes:
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("after %s, called back with %+v, want %+v", why, got, want)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("no call after %s", why)
+		}
+	}
+
+	later := Pattern{Glob: "later.csv"}
+	expect("starting", Change{Files: []string{"a.txt", "b.txt"}, Unmatched: []Pattern{later}})
+
+	if err := os.WriteFile("a.txt", []byte("changed, and longer"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove("b.txt"); err != nil {
+		t.Fatal(err)
+	}
+	writeFiles(t, "c.txt")
+	expect("a change, a removal and an addition", Change{
+		Files:     []string{"a.txt", "c.txt"},
+		Added:     []string{"c.txt"},
+		Removed:   []string{"b.txt"},
+		Modified:  []string{"a.txt"},
+		Unmatched: []Pattern{later},
+	})
+
+	writeFiles(t, "later.csv")
+	expect("the file a pattern named appeared", Change{Files: []string{"a.txt", "c.txt", "later.csv"}, Added: []string{"later.csv"}})
+	stop()
+}
+
+func TestWatcherWaitsForTheCallGoingOn(t *testing.T) {
+	t.Chdir(t.TempDir())
+	writeFiles(t, "a.txt")
+	events := make(chan string, 10)
+	release := make(chan struct{})
+	w := NewWatcher(10*time.Millisecond, []Pattern{{Glob: "*.txt"}})
+	stop := runWatcher(t, w, func(ctx context.Context, c Change) {
+		events <- fmt.Sprint("start ", c.Files)
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		events <- "end"
+	})
+
+	expectEvent(t, events, "starting", "start [a.txt]")
+	writeFiles(t, "b.txt")
+	expectNoEvent(t, events, "a change while the call was going on")
+	release <- struct{}{}
+	expectEvent(t, events, "the call was let end", "end")
+	expectEvent(t, events, "the call before ended", "start [a.txt b.txt]")
+	stop()
+	expectEvent(t, events, "the watch was stopped", "end")
+}
+
+func TestWatcherKeys(t *testing.T) {
+	t.Chdir(t.TempDir())
+	writeFiles(t, "a.txt")
+	events := make(chan string, 10)
+	keys := make(chan Key)
+	w := NewWatcher(10*time.Millisecond, []Pattern{{Glob: "*.txt"}}, WithKeys(keys))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error)
+	go func() {
+		done <- w.Run(ctx, func(ctx context.Context, c Change) {
+			events <- "start"
+			<-ctx.Done() // a command that runs until it is stopped
+			events <- "stop"
+		})
+	}()
+
+	expectEvent(t, events, "starting", "start")
+	keys <- KeyStop
+	expectEvent(t, events, "KeyStop", "stop")
+	keys <- KeyRun
+	expectEvent(t, events, "KeyRun", "start")
+	keys <- KeyRun
+	expectEvent(t, events, "KeyRun while a call was going on", "stop")
+	expectEvent(t, events, "KeyRun while a call was going on", "start")
+	keys <- KeyStop
+	expectEvent(t, events, "KeyStop", "stop")
+
+	keys <- KeyPause
+	writeFiles(t, "b.txt")
+	expectNoEvent(t, events, "a change while paused")
+	keys <- KeyPause
+	expectEvent(t, events, "going on after a change while paused", "start")
+
+	keys <- KeyQuit
+	expectEvent(t, events, "KeyQuit", "stop")
+	if err := <-done; err != nil {
+		t.Errorf("Run returned %v after KeyQuit, want nil", err)
 	}
 }

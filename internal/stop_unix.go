@@ -18,9 +18,10 @@ const stopGrace = 5 * time.Second
 // builds and runs, which would otherwise go on holding its port. cmd is
 // killed if it is still running stopGrace later.
 //
-// It is only for a command watcheroo stops itself, as --restart does: a
-// command outside the terminal's process group cannot use the terminal, so
-// one that opens a pager would hang.
+// Every command runs this way, as watcheroo may stop any of them: on a
+// change with --restart or in diff mode, after --timeout, or when s is
+// pressed. A command outside the terminal's process group cannot use the
+// terminal, so one that opens a pager hangs; it leaves the keys to watcheroo.
 func stopGroup(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
