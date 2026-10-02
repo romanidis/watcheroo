@@ -1,19 +1,9 @@
-package internal
+package domain
 
 import (
 	"path/filepath"
 	"strings"
 )
-
-// JoinCommand spells argv as one line that a shell reads back as the same
-// arguments, quoting the ones that need it.
-func JoinCommand(argv []string) string {
-	quoted := make([]string, len(argv))
-	for i, arg := range argv {
-		quoted[i] = shellQuote(arg)
-	}
-	return strings.Join(quoted, " ")
-}
 
 // shellQuote quotes s for sh, unless it is safe as it is.
 func shellQuote(s string) string {

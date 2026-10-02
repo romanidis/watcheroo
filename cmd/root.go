@@ -1,3 +1,8 @@
+// Package cmd is the command line, and where wtr is put together: it reads
+// the flags and the arguments, says what is wrong with how they were given,
+// plugs the adapters into the watch use cases, and hands those the rest as
+// it was given, for them to make sense of. It knows flags, cobra and the help
+// text, and nothing of how a watch works.
 package cmd
 
 import (
@@ -6,22 +11,35 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"os/signal"
-	"regexp"
 	"runtime/debug"
 	"syscall"
 	"time"
 
-	"github.com/bmatcuk/doublestar/v4"
-	"github.com/romanidis/watcheroo/internal"
+	"github.com/romanidis/watcheroo/internal/cli"
+	"github.com/romanidis/watcheroo/internal/disk"
+	"github.com/romanidis/watcheroo/internal/domain"
+	"github.com/romanidis/watcheroo/internal/process"
+	"github.com/romanidis/watcheroo/internal/terminal"
+	"github.com/romanidis/watcheroo/internal/watch"
 	"github.com/spf13/cobra"
 )
 
-// NewRootCmd builds the watcheroo command.
+// Execute runs the wtr command, until it ends or wtr is interrupted. main
+// calls it, and nothing else should.
+func Execute() {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	err := NewRootCmd().ExecuteContext(ctx)
+	stop()
+	if err != nil {
+		os.Exit(1)
+	}
+}
+
+// NewRootCmd builds the wtr command.
 func NewRootCmd() *cobra.Command {
 	var (
-		patterns     = &patternList{}
+		patterns     *cli.PatternList // set once cmd, whose flags it counts, is built
 		mode         string
 		interval     time.Duration
 		exclude      []string
@@ -135,118 +153,53 @@ as it is of {}:
 			if dash < 0 || dash == len(args) {
 				return errors.New("give the command to run after --")
 			}
-			watched, err := patterns.patterns(args[:dash])
-			if err != nil {
-				return err
-			}
-			argv := args[dash:]
-			if shell {
-				if len(argv) != 1 {
-					return errors.New(`with --shell, give the command as one argument after --, quoted, with "$@" where the files go`)
-				}
-				argv = []string{"sh", "-c", argv[0], "sh", "{}"}
-			}
-			if len(watched) == 0 {
-				return errors.New("nothing to watch: give --watch or --regex")
-			}
-			excludeRes, err := compile("--exclude-regex", excludeRegex)
-			if err != nil {
-				return err
-			}
-			for _, glob := range exclude {
-				if !doublestar.ValidatePathPattern(glob) {
-					return fmt.Errorf("--exclude %q: %w", glob, doublestar.ErrBadPattern)
-				}
-			}
-			m, err := internal.ParseMode(mode)
-			if err != nil {
-				return fmt.Errorf("--mode is one of %v, not %q", internal.ModeValues(), mode)
-			}
-			b, err := internal.ParseBaseline(baseline)
-			if err != nil {
-				return fmt.Errorf("--baseline is one of %v, not %q", internal.BaselineValues(), baseline)
-			}
-			if interval <= 0 {
-				return errors.New("--interval must be more than zero")
-			}
-			if debounce < 0 {
-				return errors.New("--debounce cannot be less than zero")
+			flags := cmd.Flags()
+			if mode != string(domain.ModeDiff) && (flags.Changed("baseline") || flags.Changed("context")) {
+				return errors.New("--baseline and --context work only with --mode diff")
 			}
 			if contextLines < 0 {
 				return errors.New("--context cannot be less than zero")
 			}
-			if timeout < 0 {
-				return errors.New("--timeout cannot be less than zero")
-			}
-			flags := cmd.Flags()
-			if m != internal.ModeDiff && (flags.Changed("baseline") || flags.Changed("context")) {
-				return errors.New("--baseline and --context work only with --mode diff")
-			}
-			if restart && m == internal.ModeDiff {
-				return errors.New("--restart does not work with --mode diff, which shows the output only once the command ends")
-			}
-			if restart && timeout > 0 {
-				return errors.New("--timeout does not work with --restart, whose command runs until a change stops it")
-			}
-			if _, err := exec.LookPath(argv[0]); err != nil {
-				return err
+			if !flags.Changed("context") {
+				contextLines = -1 // every line
 			}
 
-			watchOpts := []internal.WatcherOption{
-				internal.WithExcludes(exclude, excludeRes),
-				internal.WithDebounce(debounce),
+			watchFiles, listWatched := wire(cmd.OutOrStdout(), cmd.ErrOrStderr(), noColor || os.Getenv("NO_COLOR") != "", ringBell)
+			watchlist := watch.WatchlistInput{
+				Patterns:     patterns.Inputs(args[:dash]),
+				Exclude:      exclude,
+				ExcludeRegex: excludeRegex,
+				Hidden:       hidden,
 			}
-			if hidden {
-				watchOpts = append(watchOpts, internal.WithHidden())
-			}
-			if postpone {
-				watchOpts = append(watchOpts, internal.WithPostpone())
-			}
-			// Diff mode stops a run a change makes stale, as --restart does.
-			if restart || m == internal.ModeDiff {
-				watchOpts = append(watchOpts, internal.WithRestart())
-			}
-			out := cmd.OutOrStdout()
-			runOpts := []internal.RunnerOption{internal.WithBaseline(b)}
-			if flags.Changed("context") {
-				runOpts = append(runOpts, internal.WithContextLines(contextLines))
-			}
-			if mergeStderr {
-				runOpts = append(runOpts, internal.WithMergedStderr())
-			}
-			if timeout > 0 {
-				runOpts = append(runOpts, internal.WithTimeout(timeout))
-			}
-			if ringBell {
-				runOpts = append(runOpts, internal.WithBell())
-			}
-			if !isTerminal(out) {
-				runOpts = append(runOpts, internal.WithoutClear())
-			}
-			if !isTerminal(out) || noColor || os.Getenv("NO_COLOR") != "" {
-				runOpts = append(runOpts, internal.WithoutColor())
-			}
-
-			r := internal.NewRunner(argv, m, out, cmd.ErrOrStderr(), runOpts...)
+			command := watch.CommandInput{Argv: args[dash:], Shell: shell}
 			if list {
-				return printList(out, internal.NewWatcher(interval, watched, watchOpts...), r)
-			}
-			if isTerminal(out) {
-				if kb, err := internal.OpenKeyboard(); err == nil {
-					defer kb.Close()
-					keys := make(chan internal.Key)
-					go readKeys(kb, keys, r)
-					watchOpts = append(watchOpts, internal.WithKeys(keys))
+				res, err := listWatched.Handle(cmd.Context(), watch.ListWatchedQuery{Watchlist: watchlist, Command: command})
+				if err != nil {
+					return err
 				}
+				printList(cmd.OutOrStdout(), res)
+				return nil
 			}
-			w := internal.NewWatcher(interval, watched, watchOpts...)
-			return w.Run(cmd.Context(), r.Run)
+			_, err := watchFiles.Handle(cmd.Context(), watch.WatchFilesCommand{
+				Watchlist:   watchlist,
+				Command:     command,
+				Mode:        mode,
+				Baseline:    baseline,
+				Context:     contextLines,
+				MergeStderr: mergeStderr,
+				Interval:    interval,
+				Debounce:    debounce,
+				Timeout:     timeout,
+				Restart:     restart,
+				Postpone:    postpone,
+			})
+			return err
 		},
 	}
-	patterns.flags = cmd.Flags()
-	cmd.Flags().VarP(patterns.value(false), "watch", "w", "a file or glob to watch; repeat it, or list more before --")
-	cmd.Flags().VarP(patterns.value(true), "regex", "r", "a regular expression for the paths of files to watch; repeat it for more")
-	cmd.Flags().StringVarP(&mode, "mode", "m", string(internal.ModeClear), "what to do with the previous output: clear, append or diff")
+	patterns = cli.NewPatternList(cmd.Flags())
+	cmd.Flags().VarP(patterns.Value(false), "watch", "w", "a file or glob to watch; repeat it, or list more before --")
+	cmd.Flags().VarP(patterns.Value(true), "regex", "r", "a regular expression for the paths of files to watch; repeat it for more")
+	cmd.Flags().StringVarP(&mode, "mode", "m", string(domain.ModeClear), "what to do with the previous output: clear, append or diff")
 	cmd.Flags().DurationVar(&interval, "interval", 300*time.Millisecond, "how often to look for changes")
 	cmd.Flags().StringArrayVarP(&exclude, "exclude", "x", nil, "a file, directory or glob not to watch; repeat it for more")
 	cmd.Flags().StringArrayVar(&excludeRegex, "exclude-regex", nil, "a regular expression for the paths not to watch; repeat it for more")
@@ -256,48 +209,34 @@ as it is of {}:
 	cmd.Flags().BoolVar(&restart, "restart", false, "stop the command when a change comes while it is still running, and start it again")
 	cmd.Flags().DurationVar(&debounce, "debounce", 0, "how long the files must stay unchanged before a run")
 	cmd.Flags().BoolVar(&noColor, "no-color", false, "leave out the colours, as NO_COLOR does")
-	cmd.Flags().StringVar(&baseline, "baseline", string(internal.BaselinePrevious), "the run diff mode compares with: previous or first")
+	cmd.Flags().StringVar(&baseline, "baseline", string(domain.BaselinePrevious), "the run diff mode compares with: previous or first")
 	cmd.Flags().IntVar(&contextLines, "context", 0, "in diff mode, show only the lines that changed and this many lines around each")
 	cmd.Flags().BoolVar(&mergeStderr, "merge-stderr", false, "send the command's stderr where its stdout goes, so diff mode compares it too")
 	cmd.Flags().DurationVar(&timeout, "timeout", 0, "stop a run that takes longer than this")
 	cmd.Flags().BoolVarP(&shell, "shell", "s", false, `run the command, one argument after --, with sh -c, the watched files in "$@"`)
 	cmd.Flags().BoolVar(&ringBell, "bell", false, "ring the terminal bell when a run fails or times out")
-	_ = cmd.RegisterFlagCompletionFunc("mode", completeWatcherooMode)
-	_ = cmd.RegisterFlagCompletionFunc("baseline", completeWatcherooBaseline)
+	_ = cmd.RegisterFlagCompletionFunc("mode", completeMode)
+	_ = cmd.RegisterFlagCompletionFunc("baseline", completeBaseline)
 	return cmd
 }
 
-// readKeys sends the Key each key pressed on kb stands for to keys, until kb
-// is closed: space runs the command now, s stops the run going on, p pauses
-// the watch or goes on with it, and q quits. b makes r compare the next run
-// with the last one it showed.
-func readKeys(kb *internal.Keyboard, keys chan<- internal.Key, r *internal.Runner) {
-	paused := false
-	for {
-		key, err := kb.ReadKey()
-		if err != nil {
-			return
-		}
-		switch key {
-		case ' ':
-			keys <- internal.KeyRun
-		case 's':
-			keys <- internal.KeyStop
-		case 'p':
-			keys <- internal.KeyPause
-			paused = !paused
-			if paused {
-				r.Note("paused: changes wait until p is pressed again")
-			} else {
-				r.Note("watching again")
-			}
-		case 'q':
-			keys <- internal.KeyQuit
-		case 'b':
-			r.NewBaseline()
-		}
-	}
+// wire plugs the adapters into the use cases, showing things on stdout and
+// stderr. It is the one place the concrete use cases are named; the rest of
+// the command line knows them by their handler shapes.
+func wire(stdout, stderr io.Writer, noColor, bell bool) (watch.WatchFilesHandler, watch.ListWatchedHandler) {
+	files := disk.Scanner{}
+	commands := process.Runner{}
+	screen := terminal.NewScreen(stdout, stderr, terminal.OptionsFor(stdout, noColor, bell))
+	return watch.NewWatchFilesUsecase(files, commands, commands, screen, terminal.NewKeys(stdout), wallClock{}),
+		watch.NewListWatchedUsecase(files, commands)
 }
+
+var _ watch.Clock = wallClock{}
+
+// wallClock is the time of day.
+type wallClock struct{}
+
+func (wallClock) Now() time.Time { return time.Now() }
 
 // version returns the version of the module wtr was built from, which go
 // install, and go build in a git checkout, write into the binary.
@@ -308,30 +247,26 @@ func version() string {
 	return "(devel)"
 }
 
-// completeWatcherooBaseline completes --baseline on watcheroo.
+// completeBaseline completes --baseline.
 //
 // The directive is the second half of the answer: NoFileComp stops the
 // shell offering file names on top of the words returned, which is what
 // a list of words almost always wants.
-func completeWatcherooBaseline(
+func completeBaseline(
 	cmd *cobra.Command,
 	args []string,
 	toComplete string,
 ) ([]string, cobra.ShellCompDirective) {
-	return words(internal.BaselineValues()), cobra.ShellCompDirectiveNoFileComp
+	return words(domain.BaselineValues()), cobra.ShellCompDirectiveNoFileComp
 }
 
-// completeWatcherooMode completes --mode on watcheroo.
-//
-// The directive is the second half of the answer: NoFileComp stops the
-// shell offering file names on top of the words returned, which is what
-// a list of words almost always wants.
-func completeWatcherooMode(
+// completeMode completes --mode, the same way.
+func completeMode(
 	cmd *cobra.Command,
 	args []string,
 	toComplete string,
 ) ([]string, cobra.ShellCompDirective) {
-	return words(internal.ModeValues()), cobra.ShellCompDirectiveNoFileComp
+	return words(domain.ModeValues()), cobra.ShellCompDirectiveNoFileComp
 }
 
 // words spells each of values as its String does.
@@ -343,63 +278,21 @@ func words[T fmt.Stringer](values []T) []string {
 	return out
 }
 
-// compile compiles every one of exprs, the values of flag.
-func compile(flag string, exprs []string) ([]*regexp.Regexp, error) {
-	res := make([]*regexp.Regexp, 0, len(exprs))
-	for _, expr := range exprs {
-		re, err := regexp.Compile(expr)
-		if err != nil {
-			return nil, fmt.Errorf("%s: %w", flag, err)
-		}
-		res = append(res, re)
-	}
-	return res, nil
-}
-
-// isTerminal reports whether w is a terminal, the only place where colours
-// and clearing the screen make sense.
-func isTerminal(w io.Writer) bool {
-	f, ok := w.(*os.File)
-	if !ok {
-		return false
-	}
-	info, err := f.Stat()
-	return err == nil && info.Mode()&os.ModeCharDevice != 0
-}
-
-// printList prints the files w watches now, the patterns that match none,
-// and the command r runs for the files.
-func printList(out io.Writer, w internal.Watcher, r *internal.Runner) error {
-	files, err := w.Files()
-	if err != nil {
-		return err
-	}
-	unmatched, err := w.Unmatched()
-	if err != nil {
-		return err
-	}
+// printList prints what --list found: the files watched, the patterns that
+// match none, and the command a run would make.
+func printList(out io.Writer, res watch.ListWatchedResult) {
 	fmt.Fprintln(out, "watching:")
-	for _, file := range files {
+	for _, file := range res.Files {
 		fmt.Fprintf(out, "  %s\n", file)
 	}
-	if len(files) == 0 {
+	if len(res.Files) == 0 {
 		fmt.Fprintln(out, "  (nothing matches yet)")
 	}
-	if len(unmatched) > 0 {
+	if len(res.Unmatched) > 0 {
 		fmt.Fprintln(out, "matching nothing yet:")
-		for _, p := range unmatched {
+		for _, p := range res.Unmatched {
 			fmt.Fprintf(out, "  %s\n", p)
 		}
 	}
-	fmt.Fprintf(out, "running:\n  %s\n", internal.JoinCommand(r.Command(files)))
-	return nil
-}
-
-// Execute runs the root command. main calls it, and nothing else should.
-func Execute() {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	if err := NewRootCmd().ExecuteContext(ctx); err != nil {
-		os.Exit(1)
-	}
+	fmt.Fprintf(out, "running:\n  %s\n", res.Command)
 }

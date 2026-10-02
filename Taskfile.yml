@@ -6,7 +6,7 @@ tasks:
   build:
     desc: "Build wtr into bin/"
     cmds:
-      - go build -o bin/wtr ./cmd/wtr
+      - go build -o bin/wtr .
 
   test:
     desc: "Vet the code and run the tests with the race detector"
@@ -16,8 +16,12 @@ tasks:
 
   install:
     desc: "Install wtr into $GOBIN, or ~/go/bin"
+    vars:
+      GOBIN:
+        sh: go env GOBIN | grep . || echo "$(go env GOPATH)/bin"
     cmds:
-      - go install ./cmd/wtr
+      # Not go install, which names the binary after the module, watcheroo.
+      - go build -o "{{.GOBIN}}/wtr" .
 
   docs:
     desc: "Write the command reference into docs/"

@@ -1,4 +1,4 @@
-package cmd
+package cmd_test
 
 import (
 	"bytes"
@@ -6,24 +6,26 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/romanidis/watcheroo/cmd"
 )
 
-// executeWatcheroo runs the root command with args and returns everything it wrote.
+// executeWtr runs the root command with args and returns everything it wrote.
 // Its context is already cancelled, so a watch that starts stops after its first run.
-func executeWatcheroo(t *testing.T, args ...string) (string, error) {
+func executeWtr(t *testing.T, args ...string) (string, error) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	var out bytes.Buffer
-	cmd := NewRootCmd()
-	cmd.SetOut(&out)
-	cmd.SetErr(&out)
-	cmd.SetArgs(args)
-	err := cmd.ExecuteContext(ctx)
+	root := cmd.NewRootCmd()
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs(args)
+	err := root.ExecuteContext(ctx)
 	return out.String(), err
 }
 
-func TestWatcheroo(t *testing.T) {
+func TestWtr(t *testing.T) {
 	tests := []struct {
 		name    string
 		args    []string
@@ -82,25 +84,25 @@ func TestWatcheroo(t *testing.T) {
 		{
 			name:    "a regex that does not parse",
 			args:    []string{"--regex", "(", "--", "echo"},
-			want:    "--regex: error parsing regexp",
+			want:    "regex: error parsing regexp",
 			wantErr: true,
 		},
 		{
 			name:    "an unknown --mode",
 			args:    []string{"--watch", "file1.txt", "--mode", "fancy", "--", "echo"},
-			want:    `--mode is one of [clear append diff], not "fancy"`,
+			want:    `unknown mode "fancy": it is one of [clear append diff]`,
 			wantErr: true,
 		},
 		{
 			name:    "a zero --interval",
 			args:    []string{"--watch", "file1.txt", "--interval", "0s", "--", "echo"},
-			want:    "--interval must be more than zero",
+			want:    "interval must be more than zero",
 			wantErr: true,
 		},
 		{
 			name:    "an unknown --baseline",
 			args:    []string{"--watch", "file1.txt", "-m", "diff", "--baseline", "last", "--", "echo"},
-			want:    `--baseline is one of [previous first], not "last"`,
+			want:    `unknown baseline "last": it is one of [previous first]`,
 			wantErr: true,
 		},
 		{
@@ -124,43 +126,43 @@ func TestWatcheroo(t *testing.T) {
 		{
 			name:    "a negative --debounce",
 			args:    []string{"--watch", "file1.txt", "--debounce", "-1s", "--", "echo"},
-			want:    "--debounce cannot be less than zero",
+			want:    "debounce cannot be less than zero",
 			wantErr: true,
 		},
 		{
 			name:    "--restart in diff mode",
 			args:    []string{"--watch", "file1.txt", "-m", "diff", "--restart", "--", "echo"},
-			want:    "--restart does not work with --mode diff",
+			want:    "restart does not work with diff mode",
 			wantErr: true,
 		},
 		{
 			name:    "--shell with the command in more than one argument",
 			args:    []string{"--watch", "file1.txt", "--shell", "--", "awk", "-f", "x.awk"},
-			want:    "with --shell, give the command as one argument after --",
+			want:    "give a shell command as one argument",
 			wantErr: true,
 		},
 		{
 			name:    "a negative --timeout",
 			args:    []string{"--watch", "file1.txt", "--timeout", "-1s", "--", "echo"},
-			want:    "--timeout cannot be less than zero",
+			want:    "timeout cannot be less than zero",
 			wantErr: true,
 		},
 		{
 			name:    "--timeout with --restart",
 			args:    []string{"--watch", "file1.txt", "--restart", "--timeout", "1s", "--", "echo"},
-			want:    "--timeout does not work with --restart",
+			want:    "timeout does not work with restart",
 			wantErr: true,
 		},
 		{
 			name:    "an --exclude that does not parse",
 			args:    []string{"--watch", "file1.txt", "--exclude", "[", "--", "echo"},
-			want:    `--exclude "[": syntax error in pattern`,
+			want:    `exclude "[": syntax error in pattern`,
 			wantErr: true,
 		},
 		{
 			name:    "an --exclude-regex that does not parse",
 			args:    []string{"--watch", "file1.txt", "--exclude-regex", "(", "--", "echo"},
-			want:    "--exclude-regex: error parsing regexp",
+			want:    "exclude regex: error parsing regexp",
 			wantErr: true,
 		},
 		{
@@ -175,14 +177,14 @@ func TestWatcheroo(t *testing.T) {
 		},
 		{
 			name:    "a command that is not on PATH",
-			args:    []string{"--watch", "file1.txt", "--", "watcheroo-no-such-command"},
+			args:    []string{"--watch", "file1.txt", "--", "wtr-no-such-command"},
 			want:    "executable file not found",
 			wantErr: true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			out, err := executeWatcheroo(t, tt.args...)
+			out, err := executeWtr(t, tt.args...)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("ran with %v: %v", tt.args, err)
 			}
@@ -193,7 +195,7 @@ func TestWatcheroo(t *testing.T) {
 	}
 }
 
-func TestWatcherooList(t *testing.T) {
+func TestWtrList(t *testing.T) {
 	t.Chdir(t.TempDir())
 	for _, name := range []string{"report.awk", "a.csv", "b.csv", "out.csv"} {
 		if err := os.WriteFile(name, nil, 0o644); err != nil {
@@ -238,7 +240,7 @@ func TestWatcherooList(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			out, err := executeWatcheroo(t, tt.args...)
+			out, err := executeWtr(t, tt.args...)
 			if err != nil {
 				t.Fatalf("ran with %v: %v", tt.args, err)
 			}
@@ -249,8 +251,8 @@ func TestWatcherooList(t *testing.T) {
 	}
 }
 
-func TestWatcherooNotATerminal(t *testing.T) {
-	out, err := executeWatcheroo(t, "--watch", "file1.txt", "-m", "diff", "--", "echo", "hi")
+func TestWtrNotATerminal(t *testing.T) {
+	out, err := executeWtr(t, "--watch", "file1.txt", "-m", "diff", "--", "echo", "hi")
 	if err != nil {
 		t.Fatal(err)
 	}

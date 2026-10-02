@@ -22,10 +22,12 @@ It's just tuned for the edit, run, look loop that awk scripting is.
 ## Install
 
 ```sh
-go install github.com/romanidis/watcheroo/cmd/wtr@latest
+git clone https://github.com/romanidis/watcheroo
+cd watcheroo && task install
 ```
 
-The command is `wtr`. Run it bare to see the help. For tab completion, put
+The command is `wtr`. `go install github.com/romanidis/watcheroo@latest` works
+too, but names it `watcheroo`. Run it bare to see the help. For tab completion, put
 `source <(wtr completion zsh)` in your `.zshrc`.
 bash and fish work too.
 
@@ -225,6 +227,14 @@ task build    # bin/wtr
 task test     # go vet, then the tests with -race
 task docs     # regenerate docs/ from --help
 ```
+
+`main.go` only calls `cmd`, which holds the cobra command and plugs everything
+together. The rest is under `internal`. The rules live in `internal/domain`:
+what a watchlist matches, when a change calls for a run, what `{}` becomes, how
+one run's output differs from another's. They touch no disk, process or
+terminal, so their tests are plain tables. `internal/watch` holds the two use
+cases, watching and `--list`, and the ports they need; `disk`, `process` and
+`terminal` fill those ports.
 
 ## License
 

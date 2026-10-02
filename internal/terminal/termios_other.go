@@ -1,6 +1,6 @@
 //go:build aix || linux || solaris
 
-package internal
+package terminal
 
 import "golang.org/x/sys/unix"
 

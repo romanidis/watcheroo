@@ -1,8 +1,15 @@
-package internal
+package domain
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
 
-// Mode is how a run's output is shown next to the output of the runs before it.
+// ErrUnknownMode is a mode that is none of ModeValues.
+var ErrUnknownMode = errors.New("unknown mode")
+
+// Mode is how a run's output is shown next to the output of the runs before
+// it. The set is closed.
 type Mode string
 
 const (
@@ -10,7 +17,7 @@ const (
 	ModeClear Mode = "clear"
 	// ModeAppend keeps earlier output and prints each run below the last.
 	ModeAppend Mode = "append"
-	// ModeDiff clears the screen and shows how the output differs from the previous run's.
+	// ModeDiff shows how the output differs from the previous run's.
 	ModeDiff Mode = "diff"
 )
 
@@ -28,13 +35,19 @@ func (m Mode) IsValid() bool {
 	return false
 }
 
+// Compares reports whether runs in m are compared with the run before. Their
+// output is kept to compare, rather than shown as it comes.
+func (m Mode) Compares() bool {
+	return m == ModeDiff
+}
+
 // ParseMode returns the Mode whose String is s.
 func ParseMode(s string) (Mode, error) {
 	mode := Mode(s)
 	if mode.IsValid() {
 		return mode, nil
 	}
-	return "", fmt.Errorf("unknown Mode: %q", s)
+	return "", fmt.Errorf("%w %q: it is one of %v", ErrUnknownMode, s, ModeValues())
 }
 
 // ModeValues returns the declared Mode constants, in declaration order.

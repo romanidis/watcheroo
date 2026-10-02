@@ -1,8 +1,15 @@
-package internal
+package domain
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
+
+// ErrUnknownBaseline is a baseline that is none of BaselineValues.
+var ErrUnknownBaseline = errors.New("unknown baseline")
 
 // Baseline is the run whose output ModeDiff compares each run's output with.
+// The set is closed.
 type Baseline string
 
 const (
@@ -32,7 +39,7 @@ func ParseBaseline(s string) (Baseline, error) {
 	if baseline.IsValid() {
 		return baseline, nil
 	}
-	return "", fmt.Errorf("unknown Baseline: %q", s)
+	return "", fmt.Errorf("%w %q: it is one of %v", ErrUnknownBaseline, s, BaselineValues())
 }
 
 // BaselineValues returns the declared Baseline constants, in declaration order.
